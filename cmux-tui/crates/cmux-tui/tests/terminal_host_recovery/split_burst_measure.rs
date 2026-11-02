@@ -29,7 +29,10 @@ fn pane_of_workspace(harness: &RecoveryHarness, name: &str) -> u64 {
 
 #[test]
 fn scratch_split_burst_measure() {
-    let harness = RecoveryHarness::start("split-burst");
+    let mut harness = RecoveryHarness::start_unstarted("split-burst");
+    let spans_path = harness.dir.join("spans.jsonl");
+    harness.extra_env.push(("CMUX_TUI_DEBUG_SPANS".into(), spans_path.display().to_string()));
+    harness.restart();
     let mut rounds = Vec::new();
     let mut all = Vec::new();
     let mut spreads = Vec::new();
@@ -83,8 +86,39 @@ fn scratch_split_burst_measure() {
     // Round 0 warms the daemon; the summary skips it.
     let mut warm_spreads = spreads[1..].to_vec();
     let mut warm_all = all[BURST..].to_vec();
-    eprintln!(
-        "SPLIT-BURST-RESULT {}",
+    std::thread::sleep(Duration::from_millis(500));
+    // Per-mark step times (the gap since the previous mark) of every traced
+    // create after round 0, as p50/max in ms.
+    let spans = fs::read_to_string(&spans_path).unwrap_or_default();
+    let mut steps: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
+    let mut traced = 0;
+    for line in spans.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let label = value["label"].as_str().unwrap_or("");
+        if label.ends_with(".follow") || label == "host" {
+            continue;
+        }
+        traced += 1;
+        let mut previous = 0.0;
+        for mark in value["marks"].as_array().into_iter().flatten() {
+            let name = mark[0].as_str().unwrap_or("?").to_string();
+            let at = mark[1].as_f64().unwrap_or(0.0) / 1000.0;
+            steps.entry(format!("{label}:{name}")).or_default().push(at - previous);
+            previous = at;
+        }
+    }
+    let step_summary = steps
+        .into_iter()
+        .map(|(name, mut gaps)| {
+            let n = gaps.len();
+            (
+                name,
+                serde_json::json!({"n": n, "p50": pct(&mut gaps, 0.5), "max": pct(&mut gaps, 1.0)}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    panic!(
+        "SPLIT-BURST-RESULT {} STEPS traced={traced} {}",
         serde_json::json!({
             "rounds": rounds,
             "spread_p50_ms": pct(&mut warm_spreads, 0.5),
@@ -92,6 +126,7 @@ fn scratch_split_burst_measure() {
             "latency_p50_ms": pct(&mut warm_all, 0.5),
             "latency_p95_ms": pct(&mut warm_all, 0.95),
             "latency_max_ms": pct(&mut warm_all, 1.0),
-        })
+        }),
+        serde_json::Value::Object(step_summary)
     );
 }
