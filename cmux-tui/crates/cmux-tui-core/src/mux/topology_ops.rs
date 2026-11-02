@@ -453,7 +453,9 @@ impl Mux {
         spawn: TerminalSpawnOptions,
         size: Option<(u16, u16)>,
     ) -> anyhow::Result<PaneSurfaceCreation> {
+        crate::debug_spans::mark("split.handoff_wait");
         let _creation_handoff = self.resource_creation_handoff.lock().unwrap();
+        crate::debug_spans::mark("split.handoff_held");
         let selectors = self
             .ordinary_pane_selectors(target)
             .with_context(|| format!("unknown pane {target}"))?;
